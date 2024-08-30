@@ -1,0 +1,14 @@
+[package]
+name = "doc-gen"
+version = "0.1.0"
+edition = "2021"
+authors = ["Ben Borla <benborla@icloud.com>"]
+description = "A Rust application that generates documentation for PHP methods using Claude AI"
+
+[dependencies]
+tokio = { version = "1.28", features = ["full"] }
+reqwest = { version = "0.11", features = ["json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+regex = "1.8"
+dotenvy = "0.15.7"
