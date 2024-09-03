@@ -1,6 +1,6 @@
 # PHP Doc Generator
 
-PHP Doc Generator is a Rust-based tool that automatically enhances documentation for PHP methods using the Claude AI model. It scans PHP files, extracts public methods, and either creates new or improves existing PHPDoc blocks directly within the source files.
+PHP Doc Generator is a Rust-based tool that automatically enhances documentation for PHP methods using the Claude AI model. It scans PHP files, extracts methods, and either creates new or improves existing PHPDoc blocks directly within the source files.
 
 ## Key Features:
 
