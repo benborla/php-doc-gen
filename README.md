@@ -1,14 +1,24 @@
 # PHP Doc Generator
 
-PHP Doc Generator is a Rust-based tool that automatically generates documentation for PHP methods using the Claude AI model. It parses PHP files, extracts public methods, and creates concise, AI-generated documentation in Markdown format.
+PHP Doc Generator is a Rust-based tool that automatically enhances documentation for PHP methods using the Claude AI model. It scans PHP files, extracts public methods, and either creates new or improves existing PHPDoc blocks directly within the source files.
 
-## Features
+## Key Features:
 
-- Parses PHP files to extract all public methods
-- Generates concise documentation for each method using Claude AI
-- Provides brief descriptions for render methods
-- Implements rate limiting with exponential backoff to handle API request limits
-- Saves the generated documentation to a Markdown file
+1. **PHP File Parsing**: Efficiently parses PHP files to identify public methods and their existing DocBlocks.
+
+2. **AI-Powered Documentation**: Utilizes the Claude AI model to generate or improve PHPDoc blocks for each method.
+
+3. **In-Place Updates**: Modifies the original PHP files, adding or enhancing DocBlocks without creating separate documentation files.
+
+4. **Intelligent Docblock Generation**: Creates concise descriptions, parameter tags, and return tags tailored to each method's signature and body.
+
+5. **Existing Docblock Enhancement**: If a method already has a docblock, the tool will improve it if it's vague or incomplete.
+
+6. **Rate Limiting Handling**: Implements a retry mechanism with exponential backoff to handle API rate limits gracefully.
+
+7. **Error Handling**: Robust error handling and reporting for various stages of the process.
+
+This tool streamlines the documentation process for PHP projects, ensuring that all public methods have clear, accurate, and up-to-date DocBlocks. It's particularly useful for large codebases or when onboarding new developers, as it provides consistent and comprehensive documentation directly within the source code.
 
 ## Installation
 
