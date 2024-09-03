@@ -1,82 +1,95 @@
 use dotenvy::dotenv;
 use regex::Regex;
-use reqwest;
+use reqwest::Client;
 use serde_json::json;
 use std::env;
 use std::error::Error;
 use std::fs;
-use std::io::Write;
+use std::io::{self, Write};
 use std::path::Path;
 use std::process;
 use std::time::Duration;
 use tokio::time::sleep;
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+enum AppError {
+    #[error("IO error: {0}")]
+    Io(#[from] io::Error),
+    #[error("Regex error: {0}")]
+    Regex(#[from] regex::Error),
+    #[error("Request error: {0}")]
+    Request(#[from] reqwest::Error),
+    #[error("Environment variable error: {0}")]
+    Env(#[from] env::VarError),
+    #[error("API response error: {0}")]
+    ApiResponse(String),
+    #[error("Parse error: {0}")]
+    Parse(String),
+}
 
 struct Method {
     name: String,
     parameters: Vec<String>,
     body: String,
+    docblock: Option<String>,
 }
 
-fn parse_php_file(file_path: &str) -> Result<Vec<Method>, Box<dyn Error>> {
+fn parse_php_file(file_path: &str) -> Result<Vec<Method>, AppError> {
     let contents = fs::read_to_string(file_path)?;
-    let method_regex =
-        Regex::new(r"(?m)^\s*public\s+function\s+(\w+)\s*\((.*?)\)\s*\{([\s\S]*?)\n\s*\}")?;
+    let method_regex = Regex::new(r"(?m)(/\*\*[\s\S]*?\*/\s*)?\s*public\s+function\s+(\w+)\s*\((.*?)\)\s*\{([\s\S]*?)\n\s*\}")?;
 
-    let mut methods = Vec::new();
+    let methods = method_regex
+        .captures_iter(&contents)
+        .map(|cap| {
+            let docblock = cap.get(1).map(|m| m.as_str().to_string());
+            let name = cap[2].to_string();
+            let parameters = cap[3]
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .collect();
+            let body = cap[4].trim().to_string();
 
-    for cap in method_regex.captures_iter(&contents) {
-        let name = cap[1].to_string();
-        let parameters = cap[2].split(',').map(|s| s.trim().to_string()).collect();
-        let body = cap[3].trim().to_string();
-
-        methods.push(Method {
-            name,
-            parameters,
-            body,
-        });
-    }
+            Method {
+                name,
+                parameters,
+                body,
+                docblock,
+            }
+        })
+        .collect();
 
     Ok(methods)
 }
 
 async fn generate_documentation(
     method: &Method,
-    client: &reqwest::Client,
-) -> Result<String, Box<dyn Error>> {
+    client: &Client,
+    api_key: &str,
+) -> Result<String, AppError> {
     let api_url = "https://api.anthropic.com/v1/messages";
-    let api_key = std::env::var("CLAUDE_API_KEY").expect("CLAUDE_API_KEY not set");
 
-    let prompt = if method.name.starts_with("render") {
-        format!(
-            "Write a single brief sentence describing the following render method in a PHP web application:\n\
-            Name: {}\n\
-            Parameters: {}\n\
-            Focus only on what view or template this method renders, without any additional details.",
-            method.name,
-            method.parameters.join(", ")
-        )
-    } else {
-        format!(
-            "Provide a brief and direct documentation for the following PHP method:\n\
-            Name: {}\n\
-            Parameters: {}\n\
-            Body:\n{}\n\
-            Include a short description (1-2 sentences), list the parameters with very brief explanations, \
-            and mention the return value if applicable. Keep it concise.",
-            method.name,
-            method.parameters.join(", "),
-            method.body
-        )
-    };
+    let prompt = format!(
+        "Generate a PHP docblock for the following method:\n\
+        Name: {}\n\
+        Parameters: {}\n\
+        Body:\n{}\n\
+        Existing docblock (if any):\n{}\n\
+        Provide a concise description, @param tags for each parameter, and @return tag if applicable. \
+        If there's an existing docblock, improve it if it's vague or incomplete.",
+        method.name,
+        method.parameters.join(", "),
+        method.body,
+        method.docblock.as_deref().unwrap_or("None")
+    );
 
-    let mut retries = 0;
     let max_retries = 3;
     let base_delay = Duration::from_secs(5);
 
-    loop {
+    for retries in 0..max_retries {
         let response = client
             .post(api_url)
-            .header("x-api-key", &api_key)
+            .header("x-api-key", api_key)
             .header("anthropic-version", "2023-06-01")
             .json(&json!({
                 "model": "claude-3-sonnet-20240229",
@@ -88,46 +101,65 @@ async fn generate_documentation(
 
         if response.status().is_success() {
             let response_body: serde_json::Value = response.json().await?;
-            let documentation = response_body["content"]
+            let docblock = response_body["content"]
                 .as_array()
                 .and_then(|arr| arr.first())
                 .and_then(|obj| obj["text"].as_str())
-                .ok_or("Failed to extract documentation from API response")?
+                .ok_or_else(|| AppError::ApiResponse("Failed to extract docblock from API response".into()))?
                 .trim()
                 .to_string();
 
-            if documentation.is_empty() {
-                return Err("Extracted documentation is empty".into());
+            if docblock.is_empty() {
+                return Err(AppError::ApiResponse("Generated docblock is empty".into()));
             }
 
-            return Ok(documentation);
+            return Ok(docblock);
         } else if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            if retries >= max_retries {
-                return Err("Max retries reached due to rate limiting".into());
+            if retries == max_retries - 1 {
+                return Err(AppError::ApiResponse("Max retries reached due to rate limiting".into()));
             }
             let delay = base_delay * 2u32.pow(retries as u32);
             println!("Rate limit hit. Retrying in {} seconds...", delay.as_secs());
             sleep(delay).await;
-            retries += 1;
         } else {
-            return Err(format!("API request failed with status: {}", response.status()).into());
+            return Err(AppError::ApiResponse(format!("API request failed with status: {}", response.status())));
         }
     }
+
+    Err(AppError::ApiResponse("Failed to generate documentation after max retries".into()))
 }
 
-fn save_documentation_to_file(input_file: &str, documentation: &str) -> Result<(), Box<dyn Error>> {
-    let input_path = Path::new(input_file);
-    let file_stem = input_path.file_stem().unwrap().to_str().unwrap();
-    let output_file = input_path.with_file_name(format!("{}.md", file_stem));
+fn update_php_file(file_path: &str, methods: &[Method]) -> Result<(), AppError> {
+    let mut contents = fs::read_to_string(file_path)?;
 
-    let mut file = fs::File::create(output_file)?;
-    file.write_all(documentation.as_bytes())?;
+    for method in methods.iter().rev() {
+        let method_regex = Regex::new(&format!(
+            r"(?m)(/\*\*[\s\S]*?\*/\s*)?\s*public\s+function\s+{}\s*\((.*?)\)\s*\{{",
+            regex::escape(&method.name)
+        ))?;
+
+        if let Some(mat) = method_regex.find(&contents) {
+            let start = mat.start();
+            let end = mat.end();
+
+            let updated_method = format!(
+                "{}\npublic function {}({})",
+                method.docblock.as_ref().unwrap_or(&String::new()),
+                method.name,
+                method.parameters.join(", ")
+            );
+
+            contents.replace_range(start..end, &updated_method);
+        }
+    }
+
+    fs::write(file_path, contents)?;
 
     Ok(())
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() -> Result<(), AppError> {
     dotenv().ok();
 
     let args: Vec<String> = env::args().collect();
@@ -139,44 +171,29 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let file_path = &args[1];
 
-    let methods = match parse_php_file(file_path) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("Error parsing PHP file: {}", e);
-            process::exit(1);
-        }
-    };
+    let mut methods = parse_php_file(file_path)?;
 
     println!(
-        "Generating documentation for public methods in file: {}",
+        "Generating or updating docblocks for public methods in file: {}",
         file_path
     );
 
-    let mut all_documentation = String::new();
-    let client = reqwest::Client::new();
+    let client = Client::new();
+    let api_key = env::var("CLAUDE_API_KEY")?;
 
-    for method in methods {
-        match generate_documentation(&method, &client).await {
-            Ok(documentation) => {
-                println!("Generated documentation for {}", method.name);
-                all_documentation.push_str(&format!("## {}\n\n{}\n\n", method.name, documentation));
+    for method in &mut methods {
+        match generate_documentation(method, &client, &api_key).await {
+            Ok(docblock) => {
+                println!("Generated docblock for {}", method.name);
+                method.docblock = Some(docblock);
             }
-            Err(e) => eprintln!("Error generating documentation for {}: {}", method.name, e),
+            Err(e) => eprintln!("Error generating docblock for {}: {}", method.name, e),
         }
-        // Add a delay between requests to avoid rate limiting
         sleep(Duration::from_secs(1)).await;
     }
 
-    if !all_documentation.is_empty() {
-        match save_documentation_to_file(file_path, &all_documentation) {
-            Ok(()) => println!("Documentation saved successfully."),
-            Err(e) => eprintln!("Error saving documentation to file: {}", e),
-        }
-    } else {
-        println!(
-            "No documentation was generated. Make sure your PHP file contains public methods."
-        );
-    }
+    update_php_file(file_path, &methods)?;
+    println!("PHP file updated successfully with new docblocks.");
 
     Ok(())
 }
