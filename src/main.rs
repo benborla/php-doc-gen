@@ -29,6 +29,7 @@ enum AppError {
 }
 
 struct Method {
+    visibility: String,
     name: String,
     parameters: Vec<String>,
     body: String,
@@ -37,20 +38,22 @@ struct Method {
 
 fn parse_php_file(file_path: &str) -> Result<Vec<Method>, AppError> {
     let contents = fs::read_to_string(file_path)?;
-    let method_regex = Regex::new(r"(?m)(/\*\*[\s\S]*?\*/\s*)?\s*public\s+function\s+(\w+)\s*\((.*?)\)\s*\{([\s\S]*?)\n\s*\}")?;
+    let method_regex = Regex::new(r"(?m)(/\*\*[\s\S]*?\*/\s*)?\s*(public|protected|private)?\s*function\s+(\w+)\s*\((.*?)\)\s*\{([\s\S]*?)\n\s*\}")?;
 
     let methods = method_regex
         .captures_iter(&contents)
         .map(|cap| {
             let docblock = cap.get(1).map(|m| m.as_str().to_string());
-            let name = cap[2].to_string();
-            let parameters = cap[3]
+            let visibility = cap.get(2).map_or("public".to_string(), |m| m.as_str().to_string());
+            let name = cap[3].to_string();
+            let parameters = cap[4]
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .collect();
-            let body = cap[4].trim().to_string();
+            let body = cap[5].trim().to_string();
 
             Method {
+                visibility,
                 name,
                 parameters,
                 body,
@@ -71,12 +74,14 @@ async fn generate_documentation(
 
     let prompt = format!(
         "Generate a PHP docblock for the following method:\n\
+        Visibility: {}\n\
         Name: {}\n\
         Parameters: {}\n\
         Body:\n{}\n\
         Existing docblock (if any):\n{}\n\
         Provide a concise description, @param tags for each parameter, and @return tag if applicable. \
         If there's an existing docblock, improve it if it's vague or incomplete.",
+        method.visibility,
         method.name,
         method.parameters.join(", "),
         method.body,
@@ -134,7 +139,7 @@ fn update_php_file(file_path: &str, methods: &[Method]) -> Result<(), AppError> 
 
     for method in methods.iter().rev() {
         let method_regex = Regex::new(&format!(
-            r"(?m)(/\*\*[\s\S]*?\*/\s*)?\s*public\s+function\s+{}\s*\((.*?)\)\s*\{{",
+            r"(?m)(/\*\*[\s\S]*?\*/\s*)?\s*(public|protected|private)?\s*function\s+{}\s*\((.*?)\)\s*\{{",
             regex::escape(&method.name)
         ))?;
 
@@ -143,8 +148,9 @@ fn update_php_file(file_path: &str, methods: &[Method]) -> Result<(), AppError> 
             let end = mat.end();
 
             let updated_method = format!(
-                "{}\npublic function {}({})",
+                "{}\n{}function {}({})",
                 method.docblock.as_ref().unwrap_or(&String::new()),
+                if method.visibility.is_empty() { "" } else { &method.visibility + " " },
                 method.name,
                 method.parameters.join(", ")
             );
@@ -174,7 +180,7 @@ async fn main() -> Result<(), AppError> {
     let mut methods = parse_php_file(file_path)?;
 
     println!(
-        "Generating or updating docblocks for public methods in file: {}",
+        "Generating or updating docblocks for all methods in file: {}",
         file_path
     );
 
@@ -184,7 +190,7 @@ async fn main() -> Result<(), AppError> {
     for method in &mut methods {
         match generate_documentation(method, &client, &api_key).await {
             Ok(docblock) => {
-                println!("Generated docblock for {}", method.name);
+                println!("Generated docblock for {} {}", method.visibility, method.name);
                 method.docblock = Some(docblock);
             }
             Err(e) => eprintln!("Error generating docblock for {}: {}", method.name, e),
@@ -193,7 +199,7 @@ async fn main() -> Result<(), AppError> {
     }
 
     update_php_file(file_path, &methods)?;
-    println!("PHP file updated successfully with new docblocks.");
+    println!("PHP file updated successfully with new docblocks for all methods.");
 
     Ok(())
 }
